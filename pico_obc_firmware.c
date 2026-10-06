@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
+
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/watchdog.h"
@@ -16,30 +18,22 @@ typedef struct {
 
 // Πλήρες πακέτο Housekeeping Telemetry
 typedef struct {
-    ccsds_primary_header_t header; // 6 bytes
-    
-    // Payload (6 bytes)
+    ccsds_primary_header_t header; 
     uint32_t uptime_ms;            
     int16_t  core_temp_centi_c;    
-    
-    // Checksum (2 bytes)
     uint16_t crc16;                
 } ccsds_telemetry_packet_t;
 
 #pragma pack(pop)
 
-// Καταστάσεις του OBC (Flight State Machine)
 typedef enum {
-    STATE_BOOT = 0,
-    STATE_NORMAL,
+    STATE_NORMAL = 0,
     STATE_SAFE_MODE
 } obc_flight_mode_t;
 
-// Global System State
-static obc_flight_mode_t current_mode = STATE_BOOT;
+static obc_flight_mode_t current_mode = STATE_NORMAL;
 static uint16_t tlm_sequence_counter = 0;
 
-// CRC-16/CCITT calculation
 static uint16_t calculate_crc16(const uint8_t *data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {
@@ -48,7 +42,7 @@ static uint16_t calculate_crc16(const uint8_t *data, size_t length) {
             if (crc & 0x8000) {
                 crc = (crc << 1) ^ 0x1021;
             } else {
-                crc = (crc << 1) ^ 0x1021; // polynomial
+                crc = crc << 1;
             }
         }
     }
@@ -56,23 +50,15 @@ static uint16_t calculate_crc16(const uint8_t *data, size_t length) {
 }
 
 // -------------------------------------------------------------
-// TASK 1: Housekeeping Telemetry (Εκτελείται κάθε 1000ms)
+// TASK 1: Downlink Frame
 // -------------------------------------------------------------
 static void task_housekeeping_downlink(uint32_t now_ms) {
     tlm_sequence_counter++;
 
-    // Διάβασμα αισθητήρα
     uint16_t raw_adc = adc_read();
     float voltage = raw_adc * (3.3f / (1 << 12));
     float temp_c = 27.0f - (voltage - 0.706f) / 0.001721f;
 
-    // FDIR Logic: Αν ανέβει υπερβολικά η θερμοκρασία, αλλάζουμε Flight Mode
-    if (temp_c > 35.0f && current_mode != STATE_SAFE_MODE) {
-        current_mode = STATE_SAFE_MODE;
-        printf("\n[FDIR EVENT] Critical Temp threshold crossed! Switching to SAFE_MODE\n");
-    }
-
-    // Δόμηση πακέτου CCSDS
     ccsds_telemetry_packet_t pkt;
     pkt.header.packet_id = 0x0842; 
     pkt.header.packet_seq_ctrl = 0xC000 | (tlm_sequence_counter & 0x3FFF);
@@ -82,7 +68,6 @@ static void task_housekeeping_downlink(uint32_t now_ms) {
     pkt.core_temp_centi_c = (int16_t)(temp_c * 100);
     pkt.crc16 = calculate_crc16((uint8_t*)&pkt, sizeof(ccsds_telemetry_packet_t) - 2);
 
-    // Εκπομπή πλαισίου
     printf("[DOWNLINK FRAME] ");
     uint8_t *raw = (uint8_t*)&pkt;
     for (size_t i = 0; i < sizeof(ccsds_telemetry_packet_t); i++) {
@@ -93,22 +78,41 @@ static void task_housekeeping_downlink(uint32_t now_ms) {
 }
 
 // -------------------------------------------------------------
-// TASK 2: Hardware Watchdog Kick (Εκτελείται κάθε 400ms)
+// TASK 2: Telecommand Parser (Uplink) - Non Blocking!
 // -------------------------------------------------------------
-static void task_watchdog_feed(void) {
-    watchdog_update();
+static void task_telecommand_parser(void) {
+    static char cmd_buffer[32];
+    static size_t idx = 0;
+
+    int ch = getchar_timeout_us(0); // Δεν περιμένει καθόλου αν δεν υπάρχει χαρακτήρας
+    while (ch != PICO_ERROR_TIMEOUT) {
+        if (ch == '\n' || ch == '\r') {
+            if (idx > 0) {
+                cmd_buffer[idx] = '\0';
+                
+                // Επεξεργασία εντολής
+                if (strcmp(cmd_buffer, "PING") == 0) {
+                    printf("\n>>> [TC ACK] PONG! System alive and responding. <<<\n\n");
+                } else if (strcmp(cmd_buffer, "SAFE") == 0) {
+                    current_mode = STATE_SAFE_MODE;
+                    printf("\n>>> [TC EXEC] State forced to: SAFE_MODE <<<\n\n");
+                } else if (strcmp(cmd_buffer, "NORM") == 0) {
+                    current_mode = STATE_NORMAL;
+                    printf("\n>>> [TC EXEC] State forced to: NORMAL <<<\n\n");
+                } else {
+                    printf("\n>>> [TC REJECT] Unknown command: '%s' <<<\n\n", cmd_buffer);
+                }
+                idx = 0; // reset buffer
+            }
+        } else if (idx < sizeof(cmd_buffer) - 1) {
+            cmd_buffer[idx++] = (char)ch;
+        }
+        ch = getchar_timeout_us(0);
+    }
 }
 
 // -------------------------------------------------------------
-// TASK 3: Health Status Beacon (Εκτελείται κάθε 5000ms)
-// -------------------------------------------------------------
-static void task_health_beacon(uint32_t now_ms) {
-    printf(">>> [BEACON] OBC Health: ALIVE | Uptime: %lu s | Packets Sent: %u <<<\n",
-           (unsigned long)(now_ms / 1000), tlm_sequence_counter);
-}
-
-// -------------------------------------------------------------
-// MAIN: Time-Triggered Scheduler Loop
+// MAIN
 // -------------------------------------------------------------
 int main() {
     stdio_init_all();
@@ -117,54 +121,36 @@ int main() {
     adc_set_temp_sensor_enabled(true);
     adc_select_input(4);
 
-    bool was_watchdog_reset = watchdog_caused_reboot();
-
-    // 3 δευτερόλεπτα αναμονή για το USB CDC
     sleep_ms(3000);
-
-    // Watchdog timeout στα 2500ms
     watchdog_enable(2500, 1);
 
     printf("\n========================================================\n");
-    printf("   PICO 2 W (RP2350) - TIME-TRIGGERED FLIGHT SOFTWARE   \n");
-    printf("   Architecture: Non-blocking Cyclic Executive          \n");
-    if (was_watchdog_reset) {
-        printf("   [WARN] SYSTEM REBOOT TRIGGERED BY WATCHDOG TIMEOUT!  \n");
-    } else {
-        printf("   [INFO] SYSTEM REBOOT: NORMAL COLD START              \n");
-    }
+    printf("   PICO 2 W - OBC FLIGHT SOFTWARE (WITH TC UPLINK)      \n");
+    printf("   Commands available: PING | SAFE | NORM              \n");
     printf("========================================================\n\n");
 
-    current_mode = STATE_NORMAL;
-
-    // Χρονικά σημεία για τον scheduler
     uint32_t last_tlm_time = 0;
     uint32_t last_wdog_time = 0;
-    uint32_t last_beacon_time = 0;
 
     while (1) {
         uint32_t current_time = to_ms_since_boot(get_absolute_time());
 
-        // Εκτέλεση Task 2 (Watchdog) κάθε 400 ms
+        // 1. Έλεγχος για εντολές από τη Γη συνεχώς
+        task_telecommand_parser();
+
+        // 2. Watchdog kick κάθε 400ms
         if (current_time - last_wdog_time >= 400) {
-            task_watchdog_feed();
+            watchdog_update();
             last_wdog_time = current_time;
         }
 
-        // Εκτέλεση Task 1 (Housekeeping) κάθε 1000 ms
+        // 3. Telemetry downlink κάθε 1000ms
         if (current_time - last_tlm_time >= 1000) {
             task_housekeeping_downlink(current_time);
             last_tlm_time = current_time;
         }
 
-        // Εκτέλεση Task 3 (System Beacon) κάθε 5000 ms
-        if (current_time - last_beacon_time >= 5000) {
-            task_health_beacon(current_time);
-            last_beacon_time = current_time;
-        }
-
-        // Μικρό sleep 10ms για μείωση CPU churn
-        sleep_ms(10);
+        sleep_ms(5); // Πολύ μικρό delay για άμεση απόκριση στο πληκτρολόγιο
     }
 
     return 0;
