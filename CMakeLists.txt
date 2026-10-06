@@ -53,6 +53,7 @@ target_link_libraries(pico_obc_firmware
     pico_stdlib
     hardware_adc
     hardware_watchdog
+    pico_cyw43_arch_none
 )
 
 pico_add_extra_outputs(pico_obc_firmware)

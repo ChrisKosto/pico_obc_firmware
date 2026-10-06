@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "pico/cyw43_arch.h" // Για το LED του Pico 2 W
 #include "hardware/adc.h"
 #include "hardware/watchdog.h"
 
@@ -50,7 +51,7 @@ static uint16_t calculate_crc16(const uint8_t *data, size_t length) {
 }
 
 // -------------------------------------------------------------
-// TASK 1: Downlink Frame
+// TASK 1: Downlink Frame (1000ms)
 // -------------------------------------------------------------
 static void task_housekeeping_downlink(uint32_t now_ms) {
     tlm_sequence_counter++;
@@ -78,21 +79,19 @@ static void task_housekeeping_downlink(uint32_t now_ms) {
 }
 
 // -------------------------------------------------------------
-// TASK 2: Telecommand Parser (Uplink) - Non Blocking!
+// TASK 2: Telecommand Parser (Uplink)
 // -------------------------------------------------------------
 static void task_telecommand_parser(void) {
     static char cmd_buffer[32];
     static size_t idx = 0;
 
-    int ch = getchar_timeout_us(0); // Δεν περιμένει καθόλου αν δεν υπάρχει χαρακτήρας
+    int ch = getchar_timeout_us(0);
     while (ch != PICO_ERROR_TIMEOUT) {
         if (ch == '\n' || ch == '\r') {
             if (idx > 0) {
                 cmd_buffer[idx] = '\0';
-                
-                // Επεξεργασία εντολής
                 if (strcmp(cmd_buffer, "PING") == 0) {
-                    printf("\n>>> [TC ACK] PONG! System alive and responding. <<<\n\n");
+                    printf("\n>>> [TC ACK] PONG! System alive. <<<\n\n");
                 } else if (strcmp(cmd_buffer, "SAFE") == 0) {
                     current_mode = STATE_SAFE_MODE;
                     printf("\n>>> [TC EXEC] State forced to: SAFE_MODE <<<\n\n");
@@ -102,7 +101,7 @@ static void task_telecommand_parser(void) {
                 } else {
                     printf("\n>>> [TC REJECT] Unknown command: '%s' <<<\n\n", cmd_buffer);
                 }
-                idx = 0; // reset buffer
+                idx = 0;
             }
         } else if (idx < sizeof(cmd_buffer) - 1) {
             cmd_buffer[idx++] = (char)ch;
@@ -112,10 +111,41 @@ static void task_telecommand_parser(void) {
 }
 
 // -------------------------------------------------------------
+// TASK 3: Optical Satellite Beacon (Heartbeat LED)
+// -------------------------------------------------------------
+static void task_optical_beacon(uint32_t now_ms) {
+    static uint32_t last_toggle_time = 0;
+    static bool led_state = false;
+
+    if (current_mode == STATE_NORMAL) {
+        // Normal Mode: Σύντομο δορυφορικό φλας (100ms ON, 900ms OFF)
+        uint32_t interval = led_state ? 100 : 900;
+        if (now_ms - last_toggle_time >= interval) {
+            led_state = !led_state;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
+            last_toggle_time = now_ms;
+        }
+    } else {
+        // Safe Mode: Γρήγορο strobe alert (200ms ON, 200ms OFF)
+        if (now_ms - last_toggle_time >= 200) {
+            led_state = !led_state;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_state);
+            last_toggle_time = now_ms;
+        }
+    }
+}
+
+// -------------------------------------------------------------
 // MAIN
 // -------------------------------------------------------------
 int main() {
     stdio_init_all();
+
+    // Αρχικοποίηση του CYW43 chip για το LED
+    if (cyw43_arch_init()) {
+        printf("CYW43 init failed!\n");
+        return -1;
+    }
 
     adc_init();
     adc_set_temp_sensor_enabled(true);
@@ -125,7 +155,7 @@ int main() {
     watchdog_enable(2500, 1);
 
     printf("\n========================================================\n");
-    printf("   PICO 2 W - OBC FLIGHT SOFTWARE (WITH TC UPLINK)      \n");
+    printf("   PICO 2 W - OBC FLIGHT SOFTWARE (BEACON LED ACTIVE)   \n");
     printf("   Commands available: PING | SAFE | NORM              \n");
     printf("========================================================\n\n");
 
@@ -135,22 +165,25 @@ int main() {
     while (1) {
         uint32_t current_time = to_ms_since_boot(get_absolute_time());
 
-        // 1. Έλεγχος για εντολές από τη Γη συνεχώς
+        // Optical beacon task (τρέχει σε κάθε κύκλο και ελέγχει τα ms)
+        task_optical_beacon(current_time);
+
+        // Telecommand parser
         task_telecommand_parser();
 
-        // 2. Watchdog kick κάθε 400ms
+        // Watchdog kick (κάθε 400ms)
         if (current_time - last_wdog_time >= 400) {
             watchdog_update();
             last_wdog_time = current_time;
         }
 
-        // 3. Telemetry downlink κάθε 1000ms
+        // Telemetry downlink (κάθε 1000ms)
         if (current_time - last_tlm_time >= 1000) {
             task_housekeeping_downlink(current_time);
             last_tlm_time = current_time;
         }
 
-        sleep_ms(5); // Πολύ μικρό delay για άμεση απόκριση στο πληκτρολόγιο
+        sleep_ms(5);
     }
 
     return 0;
