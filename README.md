@@ -20,3 +20,7 @@ A deterministic, bare-metal flight software prototype for a CubeSat On-Board Com
 - **MCU:** Raspberry Pi RP2350 (Hazard3 RISC-V / ARM Cortex-M33)
 - **Board:** Raspberry Pi Pico 2 W
 - **Toolchain:** GCC, CMake, Ninja, Raspberry Pi Pico SDK v2.x
+- ## Ground Segment & Gateway
+- **Hardware Gateway:** FireBeetle 2 ESP32-C5 running an embedded HTTP/REST telemetry server and softAP.
+- **Data Link:** Bidirectional Serial Bridge (`ground_station/bridge.py`) multiplexing CCSDS downlinks and telecommand uplinks.
+- **Operator Interface:** Mobile/Web Mission Dashboard for real-time telemetry observation and telecommand dispatching (`PING`, `SAFE`, `NORM`).
