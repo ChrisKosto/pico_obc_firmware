@@ -10,7 +10,7 @@
 
 #pragma pack(push, 1)
 
-// CCSDS 133.0-B-2 Primary Header (6 bytes)
+// CCSDS Primary Header (6 bytes)
 typedef struct {
     uint16_t packet_id;        
     uint16_t packet_seq_ctrl;  
@@ -22,6 +22,7 @@ typedef struct {
     ccsds_primary_header_t header; 
     uint32_t uptime_ms;            
     int16_t  core_temp_centi_c;    
+    uint8_t  flight_mode;          // 0 = NORMAL, 1 = SAFE_MODE
     uint16_t crc16;                
 } ccsds_telemetry_packet_t;
 
@@ -67,15 +68,16 @@ static void task_housekeeping_downlink(uint32_t now_ms) {
 
     pkt.uptime_ms = now_ms;
     pkt.core_temp_centi_c = (int16_t)(temp_c * 100);
+    pkt.flight_mode = (current_mode == STATE_NORMAL) ? 0 : 1;
     pkt.crc16 = calculate_crc16((uint8_t*)&pkt, sizeof(ccsds_telemetry_packet_t) - 2);
 
-    printf("[DOWNLINK FRAME] ");
+    // Εκπομπή καθαρού hex frame με sync header
+    printf("$CCSDS:");
     uint8_t *raw = (uint8_t*)&pkt;
     for (size_t i = 0; i < sizeof(ccsds_telemetry_packet_t); i++) {
-        printf("%02X ", raw[i]);
+        printf("%02X", raw[i]);
     }
-    printf("| Temp: %.2f C | Mode: %s\n", 
-           temp_c, (current_mode == STATE_NORMAL) ? "NORMAL" : "SAFE_MODE");
+    printf("\n");
 }
 
 // -------------------------------------------------------------
@@ -90,16 +92,30 @@ static void task_telecommand_parser(void) {
         if (ch == '\n' || ch == '\r') {
             if (idx > 0) {
                 cmd_buffer[idx] = '\0';
-                if (strcmp(cmd_buffer, "PING") == 0) {
-                    printf("\n>>> [TC ACK] PONG! System alive. <<<\n\n");
-                } else if (strcmp(cmd_buffer, "SAFE") == 0) {
-                    current_mode = STATE_SAFE_MODE;
-                    printf("\n>>> [TC EXEC] State forced to: SAFE_MODE <<<\n\n");
-                } else if (strcmp(cmd_buffer, "NORM") == 0) {
-                    current_mode = STATE_NORMAL;
-                    printf("\n>>> [TC EXEC] State forced to: NORMAL <<<\n\n");
-                } else {
-                    printf("\n>>> [TC REJECT] Unknown command: '%s' <<<\n\n", cmd_buffer);
+                
+                // Format: $TC:<CMD_HEX>,<PARAM_HEX>
+                if (strncmp(cmd_buffer, "$TC:", 4) == 0) {
+                    unsigned int cmd_id = 0;
+                    unsigned int param = 0;
+                    if (sscanf(cmd_buffer + 4, "%x,%x", &cmd_id, &param) >= 1) {
+                        switch (cmd_id) {
+                            case 0x10: // PING
+                                printf("\n>>> [TC ACK] PONG (APID: 0x01) <<<\n\n");
+                                break;
+                            case 0x20: // SET FLIGHT MODE
+                                if (param == 0x01) {
+                                    current_mode = STATE_SAFE_MODE;
+                                    printf("\n>>> [TC EXEC] MODE -> SAFE_MODE <<<\n\n");
+                                } else {
+                                    current_mode = STATE_NORMAL;
+                                    printf("\n>>> [TC EXEC] MODE -> NORMAL <<<\n\n");
+                                }
+                                break;
+                            default:
+                                printf("\n>>> [TC REJECT] Unknown CMD: 0x%02X <<<\n\n", cmd_id);
+                                break;
+                        }
+                    }
                 }
                 idx = 0;
             }
