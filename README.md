@@ -4,8 +4,7 @@ A functional FlatSat project demonstrating autonomous, wireless board-to-board c
 
 The satellite OBC (Raspberry Pi Pico 2 W) and the ground station (ESP32) talk directly over the air using UDP sockets – no middleman PC bridge needed. Telemetry is encapsulated in CCSDS Space Packets, and the ground station serves a Mission Control web dashboard.
 
-<!-- Add a screenshot here, e.g. docs/dashboard.png -->
-<!-- ![Dashboard](docs/dashboard.png) -->
+![Dashboard](docs/dashboard.png)
 
 ---
 
