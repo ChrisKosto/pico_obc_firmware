@@ -1,52 +1,59 @@
-name: CI Build - Pico OBC Firmware
+name: OBC CI - Host Tests and Pico 2 W Build
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
+  host-tests:
+    name: Host unit tests (GCC)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout Repository
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      - name: Install host compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Run all host unit tests
+        run: bash scripts/run_host_tests.sh
+
+  pico-build:
+    name: Pico 2 W firmware (RP2350 ARM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout sources and FreeRTOS submodule
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Install Dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git python3
-
-      - name: Run Host Unit Tests
+          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git python3
+      - name: Check FreeRTOS submodule
+        run: test -f lib/FreeRTOS-Kernel/include/FreeRTOS.h
+      - name: Checkout Pico SDK v2.3.1 with submodules
         run: |
-          gcc -Wall -Wextra -Werror -I. tests/test_tc_parser.c -o test_tc
-          ./test_tc
-          gcc -Wall -Wextra -Werror -Iinclude -Isrc tests/test_telemetry.c src/telemetry.c -o test_telemetry
-          ./test_telemetry
-          gcc -Wall -Wextra -Werror -Iinclude -Isrc tests/test_fdir_fsm.c src/fdir_fsm.c -lm -o test_fdir_fsm
-          ./test_fdir_fsm
-
-      - name: Setup Pico SDK
-        run: |
-          git clone --branch 2.3.1 https://github.com/raspberrypi/pico-sdk.git picosdk
-          cd picosdk
-          git submodule update --init
-          cd ..
-        shell: bash
-
-      - name: Configure CMake
+          git clone --depth 1 --branch 2.3.1 https://github.com/raspberrypi/pico-sdk.git "$RUNNER_TEMP/pico-sdk"
+          git -C "$RUNNER_TEMP/pico-sdk" submodule update --init --recursive --depth 1
+      - name: Configure for Pico 2 W
         env:
-          PICO_SDK_PATH: ${{ github.workspace }}/picosdk
-        run: |
-          mkdir build
-          cd build
-          cmake -DPICO_BOARD=pico2_w ..
-
-      - name: Build Firmware
-        run: |
-          cd build
-          make -j$(nproc)
+          PICO_SDK_PATH: ${{ runner.temp }}/pico-sdk
+        run: cmake -S . -B build-ci -G Ninja -DPICO_BOARD=pico2_w -DCMAKE_BUILD_TYPE=Release
+      - name: Build UF2
+        run: cmake --build build-ci --parallel 4
+      - name: Check firmware output
+        run: test -s build-ci/pico_obc_firmware.uf2
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-obc-pico2w-uf2
+          path: build-ci/pico_obc_firmware.uf2
+          if-no-files-found: error
+          retention-days: 14
