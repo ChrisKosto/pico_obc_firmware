@@ -1,0 +1,43 @@
+name: CI Build - Pico OBC Firmware
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git python3
+
+      - name: Setup Pico SDK
+        run: |
+          git clone --branch 2.3.1 https://github.com/raspberrypi/pico-sdk.git picosdk
+          cd picosdk
+          git submodule update --init
+          cd ..
+        shell: bash
+
+      - name: Configure CMake
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/picosdk
+        run: |
+          mkdir build
+          cd build
+          cmake -DPICO_BOARD=pico2_w ..
+
+      - name: Build Firmware
+        run: |
+          cd build
+          make -j$(nproc)
