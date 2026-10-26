@@ -48,6 +48,8 @@ uint32_t last_packet_seq = 0;
 uint16_t last_data_len = 0;
 bool crc_valid = false;
 String last_raw_hex = "--";
+uint32_t ack_n = 0;                // number of telecommand reports received
+String last_ack = "--";            // last telecommand report, human readable
 
 unsigned long last_rx_ms = 0;      // millis() of the last packet from the OBC
 unsigned long ping_sent_time = 0;
@@ -363,6 +365,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     // ---------- Link supervision ----------
     const LOS_TIMEOUT_MS = 3000;   // > 500 ms SAFE-mode telemetry period
     let losFlag = false;
+    let lastAckN = 0;
     let gsOfflineFlag = false;
     let lastUptime = -1;
     let newPkts = 0;
@@ -387,6 +390,14 @@ const char index_html[] PROGMEM = R"rawliteral(
           if (gsOfflineFlag) {
             gsOfflineFlag = false;
             addLog("Ground station connection restored.");
+          }
+
+          // Telecommand acceptance reports from the OBC
+          if (d.ack_n !== lastAckN) {
+            if (lastAckN !== 0 || d.ack_n === 1) {
+              addLog('TC REPORT: ' + d.ack, d.ack.indexOf('REJECTED') >= 0 ? 'warn' : 'info');
+            }
+            lastAckN = d.ack_n;
           }
 
           // Loss-of-signal detection
@@ -540,6 +551,8 @@ void handleData() {
   json += "\"crc\":" + String(crc_valid ? "true" : "false") + ",";
   json += "\"rtt\":" + String(last_ping_rtt) + ",";
   json += "\"age\":" + String(age) + ",";
+  json += "\"ack_n\":" + String(ack_n) + ",";
+  json += "\"ack\":\"" + last_ack + "\",";
   json += "\"raw\":\"" + last_raw_hex + "\"";
   json += "}";
   server.send(200, "application/json", json);
@@ -559,6 +572,7 @@ void handleTC() {
     udp.beginPacket(pico_ip, UDP_PORT_TX);
     udp.write((const uint8_t*)tc_packet.c_str(), tc_packet.length());
     udp.endPacket();
+    Serial.printf("[TC] sent $TC:%s,%s to %s:%u\n", id.c_str(), val.c_str(), pico_ip.toString().c_str(), UDP_PORT_TX);
 
     server.send(200, "text/plain", "TC_DISPATCHED");
   } else {
@@ -599,6 +613,21 @@ void loop() {
           ping_sent_time = 0;
         }
       }
+      else if (line.startsWith("$TM:ACK,")) {
+        last_rx_ms = millis();
+        Serial.println("[RX] " + line);
+        String body = line.substring(8);              // e.g. "20,01,0"
+        int c1 = body.indexOf(',');
+        int c2 = body.lastIndexOf(',');
+        if (c1 > 0 && c2 > c1) {
+          int st = body.substring(c2 + 1).toInt();
+          const char *txt = (st == 0) ? "ACCEPTED" :
+                            (st == 1) ? "REJECTED (unknown)" :
+                            (st == 2) ? "REJECTED (malformed)" : "REJECTED (queue full)";
+          last_ack = "TC " + body.substring(0, c2) + " " + txt;
+          ack_n++;
+        }
+      }
       else if (line.startsWith("$CCSDS:")) {
         last_rx_ms = millis();
         String hex = line.substring(7);
@@ -635,7 +664,15 @@ void loop() {
               default: sat_mode = "UNKNOWN"; break;
             }
 
-            sat_boot_cause = (pkt.boot_cause == 1) ? "WATCHDOG_RESET" : "POWER_ON";
+            switch (pkt.boot_cause) {
+              case 0: sat_boot_cause = "POWER_ON"; break;
+              case 1: sat_boot_cause = "WATCHDOG_TIMEOUT"; break;
+              case 2: sat_boot_cause = "COMMANDED"; break;
+              case 3: sat_boot_cause = "STACK_OVERFLOW"; break;
+              case 4: sat_boot_cause = "HEAP_EXHAUSTED"; break;
+              case 5: sat_boot_cause = "FATAL_INIT"; break;
+              default: sat_boot_cause = "UNKNOWN"; break;
+            }
 
             switch (pkt.fdir_alarm) {
               case 0: sat_fdir_msg = "NOMINAL"; break;

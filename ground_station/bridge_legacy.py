@@ -1,10 +1,14 @@
+"""Legacy serial bridge: forwards lines between the Pico and the ESP32 over two COM ports.
+
+Superseded by the direct Wi-Fi/UDP link; kept for bench debugging only.
+"""
 import serial
 import threading
 import time
 
-# Βάλε εδώ τις πραγματικές θύρες COM των δύο boards
-PICO_PORT = "COM8"    # Η θύρα του Pico 2 W
-ESP32_PORT = "COM5"   # Η θύρα του FireBeetle 2 ESP32-C5 (τσέκαρέ την από το Arduino IDE)
+# Set the real COM ports of the two boards here
+PICO_PORT = "COM8"    # Raspberry Pi Pico 2 W
+ESP32_PORT = "COM5"   # FireBeetle 2 ESP32-C5 (check the port in the Arduino IDE)
 BAUD_RATE = 115200
 
 try:
@@ -15,7 +19,7 @@ except Exception as e:
     print(f"[!] Error opening serial ports: {e}")
     exit(1)
 
-# Forwarding: Από Pico -> σε ESP32
+# Forward Pico -> ESP32
 def pico_to_esp():
     while True:
         try:
@@ -25,7 +29,7 @@ def pico_to_esp():
         except Exception:
             break
 
-# Forwarding: Από ESP32 -> σε Pico
+# Forward ESP32 -> Pico
 def esp_to_pico():
     while True:
         try:
@@ -35,7 +39,7 @@ def esp_to_pico():
         except Exception:
             break
 
-# Ξεκινάμε τα δύο background threads
+# Start the two background threads
 t1 = threading.Thread(target=pico_to_esp, daemon=True)
 t2 = threading.Thread(target=esp_to_pico, daemon=True)
 
