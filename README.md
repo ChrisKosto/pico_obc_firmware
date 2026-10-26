@@ -104,9 +104,18 @@ SAFE mode lowers the telemetry rate (2 Hz instead of 20 Hz). The alarm is cleare
 
 ## Repository Structure
 
-- `pico_obc_firmware.c` – Satellite flight software (FreeRTOS tasks).
+- `src/main.c` – Application bootstrap and RTOS object creation.
+- `src/tasks.c` – FreeRTOS application tasks and watchdog supervision.
+- `src/mpu6050.c` – MPU6050 I²C driver, calibration and attitude sampling.
+- `src/fdir_fsm.c` – Hardware-independent flight-mode and FDIR logic.
+- `src/telemetry.c` – CCSDS packet construction, CRC-16 and ASCII encoding.
+- `src/network.c` – Wi-Fi, UDP downlink and telecommand reception.
+- `src/obc_state.c` – Mutex-protected shared-state access.
+- `src/reset_cause.c` – Reset-cause bookkeeping and fatal-error hooks.
+- `src/board.c` – Pico onboard temperature sensor support.
+- `include/` – Shared configuration, application types and application context.
 - `tc_parser.h` – Dependency-free telecommand parser (unit-tested on the host).
-- `tests/test_tc_parser.c` – Host-side unit tests.
+- `tests/` – Host-side parser, telemetry and FDIR unit tests.
 - `FreeRTOSConfig.h` – FreeRTOS kernel configuration (RP2350, single core).
 - `lwipopts.h` – lwIP configuration (`NO_SYS=0`, BSD sockets).
 - `CMakeLists.txt` – Build configuration (forces `pico2_w` / `rp2350-arm-s`).
@@ -151,6 +160,12 @@ SAFE mode lowers the telemetry rate (2 Hz instead of 20 Hz). The alarm is cleare
 No Pico SDK needed – only a C compiler:
 ```
 gcc -Wall -Wextra -I. tests/test_tc_parser.c -o test_tc && ./test_tc
+
+gcc -Wall -Wextra -Iinclude -Isrc tests/test_telemetry.c src/telemetry.c \
+    -o test_telemetry && ./test_telemetry
+
+gcc -Wall -Wextra -Iinclude -Isrc tests/test_fdir_fsm.c src/fdir_fsm.c \
+    -lm -o test_fdir_fsm && ./test_fdir_fsm
 ```
 
 ---
@@ -168,7 +183,7 @@ gcc -Wall -Wextra -I. tests/test_tc_parser.c -o test_tc && ./test_tc
 ## Future Work
 
 - Sequence-based packet loss statistics and a frame queue on the ground station.
-- Split the firmware into modules (IMU driver, CCSDS codec, FDIR, network) with more unit tests (CRC, packet encode/decode, FDIR logic) and CI.
+- Add integration tests for network/link recovery and ground-station frame handling.
 - Big-endian packets, telecommands as CCSDS packets, PUS service 1 verification reports, telecommand authentication.
 - Attitude filter (complementary/Mahony), magnetometer for yaw, and a basic B-dot detumbling controller.
 - Fault-injection test campaign (IMU disconnect, overheat, hung task) with measured recovery times.

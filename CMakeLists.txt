@@ -24,11 +24,21 @@ endif()
 include(FreeRTOS_Kernel_import.cmake)
 
 add_executable(pico_obc_firmware
-    pico_obc_firmware.c
+    src/main.c
+    src/board.c
+    src/fdir_fsm.c
+    src/mpu6050.c
+    src/network.c
+    src/obc_state.c
+    src/reset_cause.c
+    src/tasks.c
+    src/telemetry.c
 )
 
 target_include_directories(pico_obc_firmware PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
+    ${CMAKE_CURRENT_LIST_DIR}/include
+    ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
 target_compile_options(pico_obc_firmware PRIVATE -Wall -Wextra)

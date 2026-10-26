@@ -21,6 +21,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git python3
 
+      - name: Run Host Unit Tests
+        run: |
+          gcc -Wall -Wextra -Werror -I. tests/test_tc_parser.c -o test_tc
+          ./test_tc
+          gcc -Wall -Wextra -Werror -Iinclude -Isrc tests/test_telemetry.c src/telemetry.c -o test_telemetry
+          ./test_telemetry
+          gcc -Wall -Wextra -Werror -Iinclude -Isrc tests/test_fdir_fsm.c src/fdir_fsm.c -lm -o test_fdir_fsm
+          ./test_fdir_fsm
+
       - name: Setup Pico SDK
         run: |
           git clone --branch 2.3.1 https://github.com/raspberrypi/pico-sdk.git picosdk

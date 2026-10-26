@@ -16,5 +16,7 @@
 - `CHANGELOG.md`.
 
 ### Changed
+- Split the monolithic OBC source into focused driver, telemetry, FDIR, network, state, reset, board and task modules. Added a shared application context instead of file-scope globals.
+- Added host-side telemetry and FDIR tests and included all host tests in CI.
 - All code comments and log messages are now in English.
 - `LWIP_TIMEVAL_PRIVATE` moved inside the `lwipopts.h` include guard.
