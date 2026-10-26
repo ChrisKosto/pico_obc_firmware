@@ -1,6 +1,8 @@
 /*
- * pico_obc_firmware.c 
- * Target: Raspberry Pi Pico 2 W (RP2350 ARM) + FreeRTOS
+ * pico_obc_firmware.c
+ * Target: Raspberry Pi Pico 2 W (RP2350, Arm Cortex-M33) + FreeRTOS
+ *
+ * Satellite On-Board Computer (OBC) flight software for the CubeSat FlatSat.
  */
 
 #include <stdio.h>
@@ -25,13 +27,18 @@
 #include "semphr.h"
 #include "event_groups.h"
 
+#include "tc_parser.h"
 
+/* ------------------------------------------------------------------ */
+/* Configuration                                                       */
+/* ------------------------------------------------------------------ */
 #define WIFI_SSID               "CUBESAT-GROUND-STATION"
 #define WIFI_PASSWORD           "12345678"
 #define GS_IP                   "192.168.4.1"
 #define UDP_PORT_GS             5000
 #define UDP_PORT_PICO           5001
 #define WIFI_RETRY_MS           5000
+#define WIFI_BOOT_TIMEOUT_MS    15000
 
 #define I2C_PORT                i2c0
 #define PIN_SDA                 16
@@ -49,6 +56,9 @@
 #define FDIR_TEMP_LIMIT_C       65.0f
 #define FDIR_GYRO_LIMIT_DPS     250.0f
 #define IMU_FAIL_LIMIT          10
+/* A limit must be exceeded for this many consecutive FSM cycles (3 x 50 ms)
+ * before the FDIR reacts, so a single noisy sample cannot trigger SAFE mode. */
+#define FDIR_DEBOUNCE_SAMPLES   3
 
 #define FDIR_OK                 0
 #define FDIR_OVERHEAT           1
@@ -73,11 +83,12 @@
 
 #define STACK_INIT              2048
 #define STACK_IMU               768
-#define STACK_FSM               768
+#define STACK_FSM               1024   /* extra room for the mode-change printf */
 #define STACK_TM                1024
 #define STACK_TC                1024
 #define STACK_WDG               768
 
+/* Heartbeat bits: every supervised task sets its bit once per cycle. */
 #define HB_IMU                  (1u << 0)
 #define HB_FSM                  (1u << 1)
 #define HB_TM                   (1u << 2)
@@ -85,6 +96,28 @@
 #define HB_NET                  (1u << 4)
 #define HB_ALL                  (HB_IMU | HB_FSM | HB_TM | HB_TC | HB_NET)
 
+/* Boot / reset cause reported in telemetry (field boot_cause). */
+#define BOOT_POWER_ON           0   /* cold start                                  */
+#define BOOT_WDT_TIMEOUT        1   /* hardware watchdog expired (hung task, ...)  */
+#define BOOT_COMMANDED          2   /* telecommand $TC:99,01                       */
+#define BOOT_STACK_OVERFLOW     3   /* FreeRTOS stack overflow hook                */
+#define BOOT_HEAP_EXHAUSTED     4   /* FreeRTOS malloc-failed hook                 */
+#define BOOT_FATAL_INIT         5   /* unrecoverable error during initialisation   */
+
+/* The reset reason is kept in a watchdog scratch register, which survives a
+ * watchdog reset (but not a power cycle). Upper 16 bits = magic, lower = cause. */
+#define RESET_REASON_MAGIC      0xC0DE0000u
+#define RESET_REASON_MASK       0xFFFF0000u
+
+/* Telecommand acknowledgement status (sent as "$TM:ACK,<id>,<val>,<status>"). */
+#define TC_ACK_ACCEPTED         0
+#define TC_ACK_REJ_UNKNOWN      1
+#define TC_ACK_REJ_MALFORMED    2
+#define TC_ACK_REJ_QUEUE_FULL   3
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 typedef enum {
     FSM_MODE_BOOT      = 0,
     FSM_MODE_DETUMBLE  = 1,
@@ -93,6 +126,7 @@ typedef enum {
 } flight_mode_t;
 
 typedef enum {
+    TC_NONE        = 0,
     TC_SET_NOMINAL = 1,
     TC_SET_SAFE    = 2
 } tc_cmd_t;
@@ -113,8 +147,8 @@ typedef struct {
     int16_t  pitch_centi_deg;
     int16_t  yaw_centi_deg;
     uint8_t  flight_mode;
-    uint8_t  boot_cause;       
-    uint8_t  fdir_alarm;       
+    uint8_t  boot_cause;
+    uint8_t  fdir_alarm;
     uint16_t crc16;
 } ccsds_telemetry_packet_t;
 #pragma pack(pop)
@@ -132,19 +166,25 @@ typedef struct {
     uint8_t       fdir_alarm;
 } obc_state_t;
 
+/* ------------------------------------------------------------------ */
+/* Globals                                                             */
+/* ------------------------------------------------------------------ */
 static obc_state_t        g_state;
 static SemaphoreHandle_t  g_state_mutex;
 static QueueHandle_t      g_tc_queue;
 static EventGroupHandle_t g_hb;
 static int                g_sock = -1;
 static float              g_gz_offset = 0.0f;
-static uint8_t            g_boot_cause = 0;
+static uint8_t            g_boot_cause = BOOT_POWER_ON;
 static volatile bool      g_reboot_commanded = false;
 
-#define NUM_TRACKED_TASKS 5
+#define NUM_TRACKED_TASKS 6
 static TaskHandle_t  g_task_handles[NUM_TRACKED_TASKS];
-static const char   *g_task_names[NUM_TRACKED_TASKS] = { "imu", "fsm", "tm", "tc", "wdg" };
+static const char   *g_task_names[NUM_TRACKED_TASKS] = { "imu", "fsm", "tm", "tc", "wdg", "net" };
 
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
 static uint16_t calc_crc16(const uint8_t *data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {
@@ -187,24 +227,49 @@ static bool wifi_link_up(void) {
     return cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP;
 }
 
-// Αν κάτι πάει στραβά, κάνουμε reboot μέσω watchdog
-static void obc_fatal_reboot(const char *reason) {
+/* ------------------------------------------------------------------ */
+/* Reset-cause bookkeeping and fatal-error handling                    */
+/* ------------------------------------------------------------------ */
+static void record_reset_reason(uint8_t cause) {
+    watchdog_hw->scratch[0] = RESET_REASON_MAGIC | cause;
+}
+
+/* Determine why we booted, then clear the scratch register. */
+static uint8_t fetch_boot_cause(void) {
+    uint32_t scratch = watchdog_hw->scratch[0];
+    watchdog_hw->scratch[0] = 0;
+
+    if (!watchdog_caused_reboot()) {
+        return BOOT_POWER_ON;
+    }
+    if ((scratch & RESET_REASON_MASK) == RESET_REASON_MAGIC) {
+        return (uint8_t)(scratch & 0xFFu);
+    }
+    return BOOT_WDT_TIMEOUT;   /* watchdog expired without a recorded reason */
+}
+
+static void obc_fatal_reboot(uint8_t cause, const char *reason) {
     printf("[FATAL] %s -> rebooting\n", reason);
+    record_reset_reason(cause);
     watchdog_reboot(0, 0, 0);
     for (;;) { }
 }
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
     (void)xTask;
+    record_reset_reason(BOOT_STACK_OVERFLOW);
     printf("[FATAL] stack overflow in task '%s'\n", pcTaskName);
     watchdog_reboot(0, 0, 0);
     for (;;) { }
 }
 
 void vApplicationMallocFailedHook(void) {
-    obc_fatal_reboot("FreeRTOS heap exhausted");
+    obc_fatal_reboot(BOOT_HEAP_EXHAUSTED, "FreeRTOS heap exhausted");
 }
 
+/* ------------------------------------------------------------------ */
+/* Downlink                                                            */
+/* ------------------------------------------------------------------ */
 static void udp_send_to_gs(const char *msg, size_t len) {
     if (g_sock < 0 || !wifi_link_up()) return;
 
@@ -218,6 +283,25 @@ static void udp_send_to_gs(const char *msg, size_t len) {
     lwip_sendto(g_sock, msg, len, 0, (struct sockaddr *)&dst, sizeof(dst));
 }
 
+/* Telecommand acceptance report. id/val are reported as "--" when the
+ * command could not be parsed. */
+static void send_tc_ack(bool have_cmd, uint8_t id, uint8_t val, uint8_t status) {
+    char msg[40];
+    int n;
+    if (have_cmd) {
+        n = snprintf(msg, sizeof(msg), "$TM:ACK,%u,%u,%u\n",
+                     (unsigned)id, (unsigned)val, (unsigned)status);
+    } else {
+        n = snprintf(msg, sizeof(msg), "$TM:ACK,--,--,%u\n", (unsigned)status);
+    }
+    if (n > 0 && (size_t)n < sizeof(msg)) {
+        udp_send_to_gs(msg, (size_t)n);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* MPU6050 driver                                                      */
+/* ------------------------------------------------------------------ */
 static bool mpu6050_init(void) {
     uint8_t wake[2] = { REG_PWR_MGMT_1, 0x00 };
     if (i2c_write_timeout_us(I2C_PORT, MPU6050_ADDR, wake, 2, false, I2C_TIMEOUT_US) < 0)
@@ -244,11 +328,15 @@ static void calibrate_gyro(void) {
             sum_gz += (float)gz / GYRO_SCALE;
             valid++;
         }
+        watchdog_update();   /* boot sequence: the init task feeds the watchdog */
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     g_gz_offset = (valid > 0) ? (sum_gz / (float)valid) : 0.0f;
 }
 
+/* ------------------------------------------------------------------ */
+/* Tasks                                                               */
+/* ------------------------------------------------------------------ */
 static void imu_task(void *arg) {
     (void)arg;
     TickType_t last_wake = xTaskGetTickCount();
@@ -303,10 +391,15 @@ static void imu_task(void *arg) {
     }
 }
 
+/* Flight-mode state machine + FDIR. Single owner of g_state.mode. */
 static void fsm_task(void *arg) {
     (void)arg;
     TickType_t last_wake = xTaskGetTickCount();
     const uint32_t detumble_start = to_ms_since_boot(get_absolute_time());
+    uint8_t overheat_cnt = 0;
+    uint8_t tumble_cnt   = 0;
+    flight_mode_t prev_mode  = FSM_MODE_BOOT;
+    uint8_t       prev_alarm = FDIR_OK;
 
     for (;;) {
         tc_cmd_t cmd;
@@ -332,24 +425,44 @@ static void fsm_task(void *arg) {
             g_state.mode = FSM_MODE_NOMINAL;
         }
 
-        if (mcu_temp > FDIR_TEMP_LIMIT_C ||
-            (g_state.imu_ok && g_state.mpu_temp_c > FDIR_TEMP_LIMIT_C)) {
+        /* Debounced limit checks: count consecutive violations. */
+        const bool overheat = (mcu_temp > FDIR_TEMP_LIMIT_C) ||
+                              (g_state.imu_ok && g_state.mpu_temp_c > FDIR_TEMP_LIMIT_C);
+        const bool tumbling = g_state.imu_ok && fabsf(g_state.gz_dps) > FDIR_GYRO_LIMIT_DPS;
+
+        overheat_cnt = overheat ? (uint8_t)((overheat_cnt < 255) ? overheat_cnt + 1 : 255) : 0;
+        tumble_cnt   = tumbling ? (uint8_t)((tumble_cnt   < 255) ? tumble_cnt   + 1 : 255) : 0;
+
+        if (overheat_cnt >= FDIR_DEBOUNCE_SAMPLES) {
             g_state.mode = FSM_MODE_SAFE;
             g_state.fdir_alarm = FDIR_OVERHEAT;
-        } else if (g_state.imu_ok && fabsf(g_state.gz_dps) > FDIR_GYRO_LIMIT_DPS) {
+        } else if (tumble_cnt >= FDIR_DEBOUNCE_SAMPLES) {
             g_state.mode = FSM_MODE_SAFE;
             g_state.fdir_alarm = FDIR_TUMBLING;
         } else if (g_state.imu_fail_count >= IMU_FAIL_LIMIT) {
+            /* already a debounced condition: 10 consecutive failed reads */
             g_state.mode = FSM_MODE_SAFE;
             g_state.fdir_alarm = FDIR_IMU_FAULT;
         }
+        const flight_mode_t cur_mode  = g_state.mode;
+        const uint8_t       cur_alarm = g_state.fdir_alarm;
+        const float         cur_gz    = g_state.gz_dps;
         state_unlock();
+
+        if (cur_mode != prev_mode || cur_alarm != prev_alarm) {
+            printf("[FSM] mode %u -> %u, alarm %u -> %u (mcu %.1fC, gz %.1f dps)\n",
+                   (unsigned)prev_mode, (unsigned)cur_mode,
+                   (unsigned)prev_alarm, (unsigned)cur_alarm, (double)mcu_temp, (double)cur_gz);
+            prev_mode  = cur_mode;
+            prev_alarm = cur_alarm;
+        }
 
         xEventGroupSetBits(g_hb, HB_FSM);
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(FSM_PERIOD_MS));
     }
 }
 
+/* Builds CCSDS telemetry packets and sends them as "$CCSDS:<hex>\n". */
 static void tm_task(void *arg) {
     (void)arg;
     static const char HEXCH[] = "0123456789ABCDEF";
@@ -395,9 +508,13 @@ static void tm_task(void *arg) {
     }
 }
 
+/* Telecommand reception: strict parsing, source check, acceptance report.
+ * Note: the ACK only confirms ACCEPTANCE (parsed and queued). Execution
+ * verification (PUS service 1 completion reports) is future work. */
 static void tc_task(void *arg) {
     (void)arg;
     char buf[64];
+    const uint32_t gs_addr = ipaddr_addr(GS_IP);
 
     for (;;) {
         struct sockaddr_in from;
@@ -406,19 +523,48 @@ static void tc_task(void *arg) {
                               (struct sockaddr *)&from, &fromlen);
         if (n > 0) {
             buf[n] = '\0';
-            tc_cmd_t cmd;
 
-            if (strstr(buf, "$TC:10,00") != NULL) {
-                const char *alive = "$TM:PUS17,ALIVE\n";
-                udp_send_to_gs(alive, strlen(alive));
-            } else if (strstr(buf, "$TC:20,00") != NULL) {
-                cmd = TC_SET_NOMINAL;
-                xQueueSend(g_tc_queue, &cmd, 0);
-            } else if (strstr(buf, "$TC:20,01") != NULL) {
-                cmd = TC_SET_SAFE;
-                xQueueSend(g_tc_queue, &cmd, 0);
-            } else if (strstr(buf, "$TC:99,01") != NULL) {
-                g_reboot_commanded = true;
+            if (from.sin_addr.s_addr != gs_addr) {
+                /* Basic sanity filter only - this is NOT authentication. */
+                printf("[TC] ignored packet from unexpected source %s\n",
+                       ip4addr_ntoa((const ip4_addr_t *)&from.sin_addr));
+            } else {
+                uint8_t id = 0, val = 0;
+                if (!tc_parse(buf, (size_t)n, &id, &val)) {
+                    printf("[TC] malformed command (%d bytes)\n", n);
+                    send_tc_ack(false, 0, 0, TC_ACK_REJ_MALFORMED);
+                } else {
+                    uint8_t  status    = TC_ACK_ACCEPTED;
+                    tc_cmd_t cmd       = TC_NONE;
+                    bool     do_ping   = false;
+                    bool     do_reboot = false;
+
+                    if      (id == 10 && val == 0) do_ping   = true;
+                    else if (id == 20 && val == 0) cmd       = TC_SET_NOMINAL;
+                    else if (id == 20 && val == 1) cmd       = TC_SET_SAFE;
+                    else if (id == 99 && val == 1) do_reboot = true;
+                    else                           status    = TC_ACK_REJ_UNKNOWN;
+
+                    if (cmd != TC_NONE && xQueueSend(g_tc_queue, &cmd, 0) != pdTRUE) {
+                        status = TC_ACK_REJ_QUEUE_FULL;
+                    }
+
+                    printf("[TC] id=%u val=%u -> status %u\n",
+                           (unsigned)id, (unsigned)val, (unsigned)status);
+                    send_tc_ack(true, id, val, status);
+
+                    if (status == TC_ACK_ACCEPTED) {
+                        if (do_ping) {
+                            const char *alive = "$TM:PUS17,ALIVE\n";
+                            udp_send_to_gs(alive, strlen(alive));
+                        }
+                        if (do_reboot) {
+                            /* Stop feeding the watchdog: the reset follows within WDT_TIMEOUT_MS. */
+                            record_reset_reason(BOOT_COMMANDED);
+                            g_reboot_commanded = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -426,15 +572,15 @@ static void tc_task(void *arg) {
     }
 }
 
+/* Watchdog supervisor: feeds the hardware watchdog only if all tasks reported in. */
 static void wdg_task(void *arg) {
-    (void)arg;
-    watchdog_enable(WDT_TIMEOUT_MS, 1);
+    (void)arg;   /* the watchdog itself is armed earlier, in init_task */
     uint32_t window_count = 0;
 
     for (;;) {
         EventBits_t bits = xEventGroupWaitBits(g_hb, HB_ALL,
-                                               pdTRUE,    
-                                               pdTRUE,    
+                                               pdTRUE,    /* clear on exit */
+                                               pdTRUE,    /* wait for all  */
                                                pdMS_TO_TICKS(WDG_WINDOW_MS));
 
         if ((bits & HB_ALL) == HB_ALL) {
@@ -459,12 +605,35 @@ static void wdg_task(void *arg) {
     }
 }
 
+/* Wi-Fi connection during boot. Feeds the watchdog while waiting, but only
+ * within a bounded deadline, so a stuck connection attempt cannot hide a hang. */
+static bool wifi_connect_at_boot(uint32_t timeout_ms) {
+    if (cyw43_arch_wifi_connect_async(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK) != 0) {
+        return false;
+    }
+    const uint32_t start = to_ms_since_boot(get_absolute_time());
+    while (!wifi_link_up()) {
+        if ((to_ms_since_boot(get_absolute_time()) - start) >= timeout_ms) {
+            return false;
+        }
+        watchdog_update();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return true;
+}
+
+/* Boot sequence, then becomes the "net" task (Wi-Fi link supervision). */
 static void init_task(void *arg) {
     (void)arg;
 
-    // Δίνουμε 1.5 δευτερόλεπτο για να προλάβεις να ανοίξεις το Serial Monitor!
-    vTaskDelay(pdMS_TO_TICKS(1500));   
-    printf("\n[OBC] Σύστημα ξεκίνησε! Αιτία: %s\n", g_boot_cause ? "WATCHDOG_RESET" : "POWER_ON");
+    /* Grace period so a serial monitor can be attached before the first logs. */
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    printf("\n[OBC] Boot. Cause: %u (0=POWER_ON 1=WDT 2=COMMANDED 3=STACK 4=HEAP 5=INIT)\n",
+           (unsigned)g_boot_cause);
+
+    /* Arm the hardware watchdog as early as possible. During the boot sequence
+     * this task feeds it; wdg_task takes over once all tasks are running. */
+    watchdog_enable(WDT_TIMEOUT_MS, 1);
 
     adc_init();
     adc_set_temp_sensor_enabled(true);
@@ -478,24 +647,25 @@ static void init_task(void *arg) {
     if (mpu6050_init()) {
         calibrate_gyro();
     } else {
-        printf("[IMU] MPU6050 δεν απαντάει... (FDIR will report IMU FAULT)\n");
+        printf("[IMU] MPU6050 not responding (FDIR will report IMU FAULT)\n");
     }
+    watchdog_update();
 
     if (cyw43_arch_init()) {
-        obc_fatal_reboot("cyw43_arch_init failed");
+        obc_fatal_reboot(BOOT_FATAL_INIT, "cyw43_arch_init failed");
     }
     cyw43_arch_enable_sta_mode();
     cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
+    watchdog_update();
 
-    int rc = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD,
-                                                CYW43_AUTH_WPA2_AES_PSK, 15000);
-    if (rc != 0) {
-        printf("[WIFI] Δεν μπήκε με την πρώτη (%d), θα ξαναπροσπαθήσει\n", rc);
+    if (!wifi_connect_at_boot(WIFI_BOOT_TIMEOUT_MS)) {
+        printf("[WIFI] initial connection failed, will keep retrying\n");
     }
+    watchdog_update();
 
     g_sock = lwip_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (g_sock < 0) {
-        obc_fatal_reboot("socket creation failed");
+        obc_fatal_reboot(BOOT_FATAL_INIT, "socket creation failed");
     }
     struct sockaddr_in local;
     memset(&local, 0, sizeof(local));
@@ -504,9 +674,9 @@ static void init_task(void *arg) {
     local.sin_port   = lwip_htons(UDP_PORT_PICO);
     local.sin_addr.s_addr = lwip_htonl(INADDR_ANY);
     if (lwip_bind(g_sock, (struct sockaddr *)&local, sizeof(local)) < 0) {
-        obc_fatal_reboot("socket bind failed");
+        obc_fatal_reboot(BOOT_FATAL_INIT, "socket bind failed");
     }
-    int rcv_timeout_ms = 500;   
+    int rcv_timeout_ms = 500;
     lwip_setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout_ms, sizeof(rcv_timeout_ms));
 
     state_lock();
@@ -514,7 +684,8 @@ static void init_task(void *arg) {
     g_state.fdir_alarm = FDIR_OK;
     state_unlock();
 
-    // Δημιουργία των tasks (ελπίζω να μη μείνουμε από μνήμη!)
+    /* Create the application tasks. g_task_handles[5] ("net") is this task. */
+    watchdog_update();
     BaseType_t ok = pdPASS;
     ok &= xTaskCreate(imu_task, "imu", STACK_IMU, NULL, PRIO_IMU, &g_task_handles[0]);
     ok &= xTaskCreate(fsm_task, "fsm", STACK_FSM, NULL, PRIO_FSM, &g_task_handles[1]);
@@ -522,16 +693,16 @@ static void init_task(void *arg) {
     ok &= xTaskCreate(tc_task,  "tc",  STACK_TC,  NULL, PRIO_TC,  &g_task_handles[3]);
     ok &= xTaskCreate(wdg_task, "wdg", STACK_WDG, NULL, PRIO_WDG, &g_task_handles[4]);
     if (ok != pdPASS) {
-        obc_fatal_reboot("task creation failed");
+        obc_fatal_reboot(BOOT_FATAL_INIT, "task creation failed");
     }
-    printf("[OBC] Όλα τα tasks τρέχουν κανονικά\n");
+    printf("[OBC] All tasks running\n");
 
     uint32_t last_try = to_ms_since_boot(get_absolute_time());
     for (;;) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
         if (!wifi_link_up() && (now - last_try) >= WIFI_RETRY_MS) {
             last_try = now;
-            printf("[WIFI] Έπεσε η σύνδεση, πάμε πάλι...\n");
+            printf("[WIFI] link down, reconnecting\n");
             cyw43_arch_wifi_connect_async(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK);
         }
         xEventGroupSetBits(g_hb, HB_NET);
@@ -542,20 +713,20 @@ static void init_task(void *arg) {
 int main(void) {
     stdio_init_all();
 
-    g_boot_cause = watchdog_caused_reboot() ? 1 : 0;
+    g_boot_cause = fetch_boot_cause();
 
     g_state_mutex = xSemaphoreCreateMutex();
     g_tc_queue    = xQueueCreate(8, sizeof(tc_cmd_t));
     g_hb          = xEventGroupCreate();
     if (g_state_mutex == NULL || g_tc_queue == NULL || g_hb == NULL) {
-        obc_fatal_reboot("RTOS object creation failed");
+        obc_fatal_reboot(BOOT_FATAL_INIT, "RTOS object creation failed");
     }
 
     memset(&g_state, 0, sizeof(g_state));
     g_state.mode = FSM_MODE_BOOT;
 
-    if (xTaskCreate(init_task, "init", STACK_INIT, NULL, PRIO_NET, NULL) != pdPASS) {
-        obc_fatal_reboot("init task creation failed");
+    if (xTaskCreate(init_task, "init", STACK_INIT, NULL, PRIO_NET, &g_task_handles[5]) != pdPASS) {
+        obc_fatal_reboot(BOOT_FATAL_INIT, "init task creation failed");
     }
 
     vTaskStartScheduler();
