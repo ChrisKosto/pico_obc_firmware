@@ -29,7 +29,14 @@ int main(void) {
     CHECK(state.mode == FSM_MODE_SAFE);
     CHECK(state.fdir_alarm == FDIR_OVERHEAT);
 
-    fdir_fsm_apply_command(&state, TC_SET_NOMINAL);
+    CHECK(!fdir_fsm_apply_command(&fsm, &state, TC_SET_NOMINAL));
+    CHECK(state.mode == FSM_MODE_SAFE);
+    /* Recovery is qualified by 20 consecutive fault-free samples. */
+    for (int i = 0; i < FDIR_RECOVERY_SAMPLES; ++i) {
+        fdir_fsm_update(&fsm, &state, 20.0f, 1100u + (uint32_t)i * 50u);
+    }
+    CHECK(state.mode == FSM_MODE_SAFE);
+    CHECK(fdir_fsm_apply_command(&fsm, &state, TC_SET_NOMINAL));
     CHECK(state.mode == FSM_MODE_NOMINAL);
     CHECK(state.fdir_alarm == FDIR_OK);
 
@@ -59,6 +66,17 @@ int main(void) {
     CHECK(state.mode == FSM_MODE_DETUMBLE);
     fdir_fsm_update(&fsm, &state, 20.0f, 101u + DETUMBLE_DURATION_MS);
     CHECK(state.mode == FSM_MODE_NOMINAL);
+
+    /* Qualification must be consecutive, not cumulative. */
+    state = (obc_state_t){ .mode = FSM_MODE_SAFE, .imu_ok = true };
+    fdir_fsm_init(&fsm, 0u);
+    for (int i = 0; i < FDIR_RECOVERY_SAMPLES - 1; ++i)
+        fdir_fsm_update(&fsm, &state, 20.0f, (uint32_t)i * 50u);
+    state.imu_ok = false;
+    fdir_fsm_update(&fsm, &state, 20.0f, 999u);
+    state.imu_ok = true;
+    CHECK(!fdir_fsm_apply_command(&fsm, &state, TC_SET_NOMINAL));
+    CHECK(state.mode == FSM_MODE_SAFE);
 
     if (failures == 0) {
         printf("fdir_fsm: all tests passed\n");

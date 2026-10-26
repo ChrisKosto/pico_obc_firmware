@@ -87,8 +87,11 @@ void network_send_to_gs(obc_context_t *ctx, const char *message, size_t length) 
     destination.sin_port = lwip_htons(UDP_PORT_GS);
     destination.sin_addr.s_addr = ipaddr_addr(GS_IP);
 
-    lwip_sendto(ctx->socket, message, length, 0,
-                (struct sockaddr *)&destination, sizeof(destination));
+    int sent = lwip_sendto(ctx->socket, message, length, 0,
+                           (struct sockaddr *)&destination, sizeof(destination));
+    if (sent < 0 || (size_t)sent != length) {
+        printf("[NET] UDP send failed or short send\n");
+    }
 }
 
 static void network_send_tc_ack(obc_context_t *ctx, bool have_command,

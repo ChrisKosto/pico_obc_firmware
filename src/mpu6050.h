@@ -14,6 +14,9 @@ typedef struct {
 void mpu6050_bus_init(void);
 bool mpu6050_init(void);
 bool mpu6050_read_sample(float gz_offset, mpu6050_sample_t *sample);
-void mpu6050_calibrate_gyro(float *gz_offset);
+/* Returns false on missing samples, excessive motion, or invalid sensor data.
+ * A failed calibration MUST NOT silently assign zero bias.
+ */
+bool mpu6050_calibrate_gyro(float *gz_offset);
 
 #endif /* MPU6050_H */

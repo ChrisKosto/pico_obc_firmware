@@ -16,6 +16,9 @@
 #define MPU6050_ADDR            0x68
 #define I2C_TIMEOUT_US          5000
 #define GYRO_SCALE              65.5f
+/* LAB ONLY: WHO_AM_I=0x72 is unverified silicon, never flight-qualified.
+ * Enable only for the identified GY-521 test unit. Disable for flight. */
+#define MPU6050_ALLOW_PROVISIONAL_ID_72 1
 
 /* FDIR configuration. */
 #define FDIR_TEMP_LIMIT_C       65.0f
@@ -23,6 +26,7 @@
 #define IMU_FAIL_LIMIT          10
 /* Three consecutive 50 ms FSM cycles must violate a limit before SAFE mode. */
 #define FDIR_DEBOUNCE_SAMPLES   3
+#define FDIR_RECOVERY_SAMPLES   20
 
 /* Task periods and watchdog configuration. */
 #define IMU_PERIOD_MS           50

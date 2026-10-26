@@ -13,7 +13,7 @@ The satellite OBC (Raspberry Pi Pico 2 W, **FreeRTOS**) and the ground station (
 ### 1. Satellite OBC (Raspberry Pi Pico 2 W, Arm Cortex-M33)
 - C on the Raspberry Pi Pico SDK with **FreeRTOS** (single core, deterministic scheduling) and **lwIP with BSD sockets**.
 - Reads an **MPU6050** IMU over I²C (roll/pitch from the accelerometer, yaw by integrating the gyro) and the **onboard core temperature** via the ADC.
-- Encapsulates housekeeping telemetry into binary frames conforming to the **CCSDS Space Packet** structure, protected by a **CRC-16/CCITT** checksum.
+- Encapsulates housekeeping telemetry into binary frames inspired by the **CCSDS Space Packet** structure (native little-endian; not CCSDS wire-format compliant), protected by a **CRC-16/CCITT** checksum.
 - Connects to the Ground Station Wi-Fi, streams telemetry via UDP and **reconnects automatically** if the link drops.
 - Flight state machine: `BOOT → DETUMBLE → NOMINAL ⇄ SAFE`.
 - **FDIR** (Fault Detection, Isolation and Recovery) with debounced limit checks and a **heartbeat-supervised hardware watchdog**.
@@ -30,7 +30,7 @@ The satellite OBC (Raspberry Pi Pico 2 W, **FreeRTOS**) and the ground station (
 | `net`  | 2 Hz | 1 | The boot/init task: after the boot sequence it becomes the Wi-Fi link supervisor and reconnect loop |
 
 - **Shared state** is protected by a mutex; **telecommands** travel from `tc` to `fsm` through a queue.
-- **Watchdog supervision:** the hardware watchdog (4 s timeout) is armed at the start of the boot sequence, before the IMU and Wi-Fi bring-up, so a hang during initialisation is also caught. During boot the init task feeds it within bounded deadlines; afterwards every task sets a heartbeat bit in an event group and the `wdg` task feeds the hardware watchdog **only if all tasks reported in** – a hung task therefore causes a reset.
+- **Watchdog supervision:** the hardware watchdog (4 s timeout) is armed as the init task starts, before the initial 1.5 s serial delay, IMU and Wi-Fi bring-up, so a hang during initialisation is also caught. During boot the init task feeds it within bounded deadlines; afterwards every task sets a heartbeat bit in an event group and the `wdg` task feeds the hardware watchdog **only if all tasks reported in** – a hung task therefore causes a reset.
 - **Reset-cause tracking:** the reason for a reboot is stored in a watchdog scratch register (which survives a watchdog reset) and reported in telemetry (see `boot_cause` below).
 - **Fault hooks:** stack overflow and heap exhaustion record their cause and force a watchdog reboot.
 - **Monitoring:** stack high-water marks (all six tasks) and free heap are printed on the USB serial port every ~30 s.
@@ -194,3 +194,24 @@ gcc -Wall -Wextra -Iinclude -Isrc tests/test_fdir_fsm.c src/fdir_fsm.c \
 ## Author
 
 Christos Kostogiannis
+
+
+## Reliability hardening (verification baseline)
+
+- **FDIR SAFE is latched.** A `SET_NOMINAL` command is rejected unless 20 consecutive
+  healthy 50 ms FSM samples have been observed. Temperature and angular-rate
+  limits still use three-sample detection debounce. Recovery requires an explicit
+  command; no automatic state change out of SAFE is performed.
+- Invalid/non-finite sensed values are treated as faults. The current IMU
+  failure threshold and telemetry ACK protocol are retained.
+- The ground station learns the OBC command endpoint only from telemetry with
+  valid CRC and plausible packet fields. **This does not authenticate the OBC**;
+  a spoofed valid frame is still possible. UDP commands and HTTP endpoints
+  remain unauthenticated; do not operate on an untrusted network.
+- The MCU gyro yaw integration uses observed elapsed time, capped after stalls,
+  and remains a drift-prone estimate, not a validated ADCS solution.
+- The watchdog is not active before the FreeRTOS init task runs. Hardware
+  bootloader and early `main()` execution are not supervised by this mechanism.
+- **Not ESA/ECSS certified.** Compliance claims require tailored requirements,
+  traceability, code reviews, V&V evidence, configuration control and hardware
+  testing. See `docs/assurance_plan.md` for the verification backlog.

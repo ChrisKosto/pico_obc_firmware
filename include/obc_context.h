@@ -22,6 +22,7 @@ typedef struct {
 
     int                socket;
     float              gz_offset;
+    bool               gyro_calibrated;
     uint8_t            boot_cause;
     volatile bool      reboot_commanded;
 

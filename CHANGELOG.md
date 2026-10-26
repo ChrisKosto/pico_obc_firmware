@@ -20,3 +20,13 @@
 - Added host-side telemetry and FDIR tests and included all host tests in CI.
 - All code comments and log messages are now in English.
 - `LWIP_TIMEVAL_PRIVATE` moved inside the `lwipopts.h` include guard.
+
+## Unreleased — reliability hardening draft
+
+- Latch FDIR SAFE mode and qualify manual recovery with consecutive healthy samples.
+- Reject unsafe NOMINAL requests in FSM (execution report protocol still TODO).
+- Enable watchdog before serial boot delay and check individual task creation.
+- Validate MPU6050 WHO_AM_I and I2C transfer lengths.
+- Integrate yaw using actual time between valid samples, bounded after stalls.
+- Log UDP short sends/errors and validate telemetry before learning GS command endpoint.
+- Expand FDIR tests and add `docs/assurance_plan.md`.

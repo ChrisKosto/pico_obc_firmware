@@ -598,7 +598,6 @@ void loop() {
 
   int packetSize = udp.parsePacket();
   if (packetSize) {
-    pico_ip = udp.remoteIP();
     char packetBuffer[255];
     int len = udp.read(packetBuffer, 254);
     if (len > 0) {
@@ -645,7 +644,13 @@ void loop() {
           memcpy(&pkt, buffer, sizeof(ccsds_telemetry_packet_t));
 
           uint16_t expected_crc = calc_crc16((uint8_t*)&pkt, sizeof(ccsds_telemetry_packet_t) - 2);
-          if (expected_crc == pkt.crc16) {
+          if (expected_crc == pkt.crc16 &&
+              pkt.header.packet_id == 0x0801u &&
+              (pkt.header.packet_seq_ctrl & 0xC000u) == 0xC000u &&
+              pkt.header.packet_data_len == sizeof(ccsds_telemetry_packet_t) - 7u &&
+              pkt.flight_mode <= 3u && pkt.fdir_alarm <= 3u && pkt.boot_cause <= 5u) {
+            /* Learn command endpoint only from a structurally valid frame. */
+            pico_ip = udp.remoteIP();
             crc_valid = true;
             last_pkt_id = pkt.header.packet_id;
             last_data_len = pkt.header.packet_data_len;
