@@ -20,6 +20,8 @@ bool network_init(void) {
         return false;
     }
     cyw43_arch_enable_sta_mode();
+    
+    // Απενεργοποίηση εξοικονόμησης ενέργειας στο Wi-Fi για να μην έχουμε lag
     cyw43_wifi_pm(&cyw43_state, CYW43_NO_POWERSAVE_MODE);
     return true;
 }
@@ -62,6 +64,7 @@ network_socket_result_t network_open_socket(int *socket_out) {
         return NETWORK_SOCKET_BIND_FAILED;
     }
 
+    // Το αφήνουμε στα 500ms όπως ήταν αρχικά
     int receive_timeout_ms = 500;
     lwip_setsockopt(*socket_out, SOL_SOCKET, SO_RCVTIMEO,
                     &receive_timeout_ms, sizeof(receive_timeout_ms));
@@ -111,7 +114,8 @@ void network_poll_telecommand(obc_context_t *ctx) {
     struct sockaddr_in source;
     socklen_t source_length = sizeof(source);
 
-    int received = lwip_recvfrom(ctx->socket, buffer, sizeof(buffer) - 1u, 0,
+    // Χρήση MSG_DONTWAIT για να μην μπλοκάρει το socket και καθυστερεί η τηλεμετρία
+    int received = lwip_recvfrom(ctx->socket, buffer, sizeof(buffer) - 1u, MSG_DONTWAIT,
                                  (struct sockaddr *)&source, &source_length);
     if (received <= 0) {
         return;
@@ -119,7 +123,6 @@ void network_poll_telecommand(obc_context_t *ctx) {
     buffer[received] = '\0';
 
     if (source.sin_addr.s_addr != ground_station_address) {
-        /* Basic sanity filter only - this is NOT authentication. */
         printf("[TC] ignored packet from unexpected source %s\n",
                ip4addr_ntoa((const ip4_addr_t *)&source.sin_addr));
         return;
@@ -160,7 +163,6 @@ void network_poll_telecommand(obc_context_t *ctx) {
         network_send_to_gs(ctx, alive, strlen(alive));
     }
     if (do_reboot) {
-        /* Stop feeding the watchdog: reset follows within WDT_TIMEOUT_MS. */
         reset_cause_record(BOOT_COMMANDED);
         ctx->reboot_commanded = true;
     }

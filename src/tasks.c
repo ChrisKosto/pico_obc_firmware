@@ -136,10 +136,16 @@ static void telemetry_task(void *argument) {
 
 static void telecommand_task(void *argument) {
     obc_context_t *ctx = (obc_context_t *)argument;
+    
+    // Fix: Setup a tick counter for our delay so we don't hog the CPU
+    TickType_t last_wake = xTaskGetTickCount();
 
     for (;;) {
         network_poll_telecommand(ctx);
         xEventGroupSetBits(ctx->heartbeat, HB_TC);
+        
+        // Let the CPU breathe for 100ms so other tasks (like TM) can run
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(100));
     }
 }
 
