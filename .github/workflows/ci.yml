@@ -19,23 +19,30 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
       - name: Install host compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc
+        run: gcc --version
       - name: Run all host unit tests
         run: bash scripts/run_host_tests.sh
 
   pico-build:
     name: Pico 2 W firmware (RP2350 ARM)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - name: Checkout sources and FreeRTOS submodule
         uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install build tools
+      - name: Check preinstalled build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git python3
+          cmake --version
+          ninja --version
+          python3 --version
+      - name: Set up cached Arm GCC toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '15.2.Rel1'
+      - name: Verify Arm compiler
+        run: arm-none-eabi-gcc --version
       - name: Check FreeRTOS submodule
         run: test -f lib/FreeRTOS-Kernel/include/FreeRTOS.h
       - name: Checkout Pico SDK v2.3.1 with submodules
