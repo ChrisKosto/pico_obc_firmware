@@ -1,5 +1,5 @@
 /*
- * Ρυθμίσεις FreeRTOS για το Pico 2 W (ARM Cortex-M33)
+ * FreeRTOS configuration for the Raspberry Pi Pico 2 W (RP2350, Arm Cortex-M33)
  */
 
 #ifndef FREERTOS_CONFIG_H
@@ -11,7 +11,7 @@
 #define configUSE_TICK_HOOK                     0
 #define configTICK_RATE_HZ                      ( ( TickType_t ) 1000 )
 #define configMAX_PRIORITIES                    32
-#define configMINIMAL_STACK_SIZE                ( configSTACK_DEPTH_TYPE ) 512 
+#define configMINIMAL_STACK_SIZE                ( configSTACK_DEPTH_TYPE ) 512
 #define configUSE_16_BIT_TICKS                  0
 #define configIDLE_SHOULD_YIELD                 1
 
@@ -51,8 +51,8 @@
 #define configTIMER_QUEUE_LENGTH                10
 #define configTIMER_TASK_STACK_DEPTH            1024
 
-/* Ρυθμίσεις για SMP (τρέχουμε σε 1 core για να είμαστε safe) */
-#if FREE_RTOS_KERNEL_SMP    
+/* SMP settings (the project runs on a single core for deterministic scheduling) */
+#if FREE_RTOS_KERNEL_SMP
 #ifndef configNUMBER_OF_CORES
 #define configNUMBER_OF_CORES                   1
 #endif
@@ -88,7 +88,7 @@
 #define INCLUDE_xTaskResumeFromISR              1
 #define INCLUDE_xQueueGetMutexHolder            1
 
-/* ARM Cortex-M33 stuff (εδώ έσκαγε πριν με το RISC-V) */
+/* Arm Cortex-M33 port settings (RP2350 Arm build) */
 #if PICO_RP2350
 #define configENABLE_MPU                        0
 #define configENABLE_TRUSTZONE                  0

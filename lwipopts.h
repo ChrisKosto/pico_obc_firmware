@@ -1,7 +1,7 @@
 #ifndef _LWIPOPTS_H
 #define _LWIPOPTS_H
 
-/* Δίκτυο και lwIP ρυθμίσεις (το αφήνουμε όπως είναι, δουλεύει κομπλέ) */
+/* lwIP configuration: NO_SYS=0 (FreeRTOS), BSD sockets enabled. */
 
 #define NO_SYS                          0
 #define LWIP_SOCKET                     1
@@ -45,7 +45,7 @@
 #define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_NETIF_HOSTNAME             1
-#define LWIP_NETIF_TX_SINGLE_PBUF       1   
+#define LWIP_NETIF_TX_SINGLE_PBUF       1
 
 #define DHCP_DOES_ARP_CHECK             0
 #define LWIP_DHCP_DOES_ACD_CHECK        0
@@ -57,6 +57,6 @@
 #define MEMP_STATS                      0
 #define LINK_STATS                      0
 
-#endif /* _LWIPOPTS_H */
+#define LWIP_TIMEVAL_PRIVATE            0
 
-#define LWIP_TIMEVAL_PRIVATE 0
+#endif /* _LWIPOPTS_H */

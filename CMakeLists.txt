@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.13)
 
-# Το board μας
+# Target board
 if(NOT PICO_BOARD)
     set(PICO_BOARD pico2_w)
 endif()
 
-# Πάμε με ARM (Cortex-M33) για το επαγγελματικό setup
+# Arm Cortex-M33 (secure) build of the RP2350
 set(PICO_PLATFORM rp2350-arm-s)
 
 include(pico_sdk_import.cmake)
@@ -16,7 +16,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-# Φέρνουμε τον kernel του FreeRTOS
+# FreeRTOS kernel (git submodule)
 set(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_LIST_DIR}/lib/FreeRTOS-Kernel)
 if(NOT EXISTS ${FREERTOS_KERNEL_PATH}/include/FreeRTOS.h)
     message(FATAL_ERROR "FreeRTOS-Kernel not found. Run: git submodule update --init")
@@ -33,15 +33,14 @@ target_include_directories(pico_obc_firmware PRIVATE
 
 target_compile_options(pico_obc_firmware PRIVATE -Wall -Wextra)
 
-# Εδώ είναι τα sos για να κάνει compile και να μη σκάει το USB
 target_link_libraries(pico_obc_firmware
     pico_stdlib
     hardware_i2c
     hardware_adc
     hardware_watchdog
-    pico_cyw43_arch_lwip_sys_freertos   
-    pico_async_context_freertos        # <-- Το fix για το COM port crash!
-    FreeRTOS-Kernel-Heap4               
+    pico_cyw43_arch_lwip_sys_freertos
+    pico_async_context_freertos        # required for FreeRTOS-based cyw43 arch (fixes USB COM port crash)
+    FreeRTOS-Kernel-Heap4
 )
 
 pico_enable_stdio_usb(pico_obc_firmware 1)
